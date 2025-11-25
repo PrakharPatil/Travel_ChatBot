@@ -1,0 +1,4 @@
+[
+  {"query": "Best historical sites in Rome", "volatility": "static"},
+  {"query": "Flight prices to London today", "volatility": "volatile"}
+]

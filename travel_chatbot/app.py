@@ -2,6 +2,7 @@
 from flask import Flask, request, jsonify
 import yaml
 import json
+import os
 from modules.orchestration import QueryOrchestrator
 from modules.graph_rag import GraphRAG
 from modules.crag import CorrectiveRAG
@@ -12,13 +13,25 @@ from modules.main_llm import MainLLM
 app = Flask(__name__)
 
 # Load config
-with open('configs/config.yaml', 'r') as f:
-    config = yaml.safe_load(f)
+try:
+    with open('configs/config.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+except FileNotFoundError:
+    print("Config file not found. Please ensure 'configs/config.yaml' exists.")
+    exit(1)
 
 # Initialize all modules
 print("Initializing modules...")
+
+# FIX: Robust Orchestrator loading
+# If the local BERT path doesn't exist, fallback to HuggingFace default to prevent crash
+bert_path = './models/bert_classifier'
+if not os.path.exists(bert_path):
+    print(f"Warning: Local BERT path '{bert_path}' not found. Using 'distilbert-base-uncased'.")
+    bert_path = 'distilbert-base-uncased'
+
 orchestrator = QueryOrchestrator(
-    bert_model_path='./models/bert_classifier',
+    bert_model_path=bert_path,
     llm_model=config['models']['llm_small']
 )
 
@@ -37,6 +50,7 @@ api_module = AskToActAPI(
     llm_model=config['models']['llm_small']
 )
 
+# Initialize Memory
 memory = MemoryManager(
     llm_model=config['models']['llm_small'],
     max_stm_turns=config['memory']['stm_max_turns']
@@ -48,8 +62,12 @@ print("All modules initialized!")
 
 # Initialize graph data (run once)
 try:
-    graph_rag.create_graph_from_data('data/travel_data.json')
-    print("Graph data loaded!")
+    # Check if file exists before trying to load
+    if os.path.exists('data/travel_data.json'):
+        graph_rag.create_graph_from_data('data/travel_data.json')
+        print("Graph data loaded!")
+    else:
+        print("Warning: 'data/travel_data.json' not found. Skipping graph data load.")
 except Exception as e:
     print(f"Graph initialization warning: {e}")
 
@@ -106,6 +124,7 @@ def handle_query():
             response = "I'm not sure how to help with that. Can you rephrase?"
 
         # Step 4: Update memory
+        # This calls the fixed MemoryManager which now handles T5 safely
         memory.add_to_stm(user_query, response)
         memory.update_ltm(user_query, response)
 
@@ -126,11 +145,16 @@ def handle_query():
 def reset_memory():
     """Reset conversation memory"""
     global memory
-    memory = MemoryManager(
-        llm_model=config['models']['llm_small'],
-        max_stm_turns=config['memory']['stm_max_turns']
-    )
-    return jsonify({'message': 'Memory reset successfully'})
+    try:
+        memory = MemoryManager(
+            llm_model=config['models']['llm_small'],
+            max_stm_turns=config['memory']['stm_max_turns']
+        )
+        print("Memory reset successfully.")
+        return jsonify({'message': 'Memory reset successfully'})
+    except Exception as e:
+        print(f"Error resetting memory: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/health', methods=['GET'])

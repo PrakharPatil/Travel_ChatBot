@@ -1,0 +1,10 @@
+[
+  {
+    "dialogue": [
+      {"user": "I like beach destinations", "bot": "Great!"},
+      {"user": "I have a budget of $2000", "bot": "Noted"}
+    ],
+    "expected_stm": "User likes beaches, budget $2000",
+    "expected_ltm": ["beach destinations", "budget:$2000"]
+  }
+]

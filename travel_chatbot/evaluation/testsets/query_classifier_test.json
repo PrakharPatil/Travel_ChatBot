@@ -1,0 +1,5 @@
+[
+  {"text": "Hello!", "label": 0},
+  {"text": "What are the best attractions in Paris?", "label": 1},
+  {"text": "What's the weather in Tokyo?", "label": 2}
+]

@@ -1,139 +1,159 @@
-# modules/memory.py
 from transformers import pipeline
 import torch
 
 
 class MemoryManager:
-    def __init__(self, llm_model='mistralai/Mistral-7B-Instruct-v0.2', max_stm_turns=10):
-        self.stm = []  # Short-term memory: list of conversation turns
-        self.ltm = {  # Long-term memory: user preferences, facts
+    def __init__(self, llm_model='google/flan-t5-base', max_stm_turns=10):
+        self.stm = []
+        self.ltm = {
             'preferences': {},
             'dislikes': {},
             'facts': {}
         }
         self.max_stm_turns = max_stm_turns
 
+        # Dynamic task selection
+        task = "text2text-generation" if "t5" in llm_model.lower() else "text-generation"
+        print(f"MemoryManager: Loading {llm_model} with task '{task}'")
+
         self.llm = pipeline(
-            "text-generation",
+            task,
             model=llm_model,
-            dtype=torch.float16,
+            dtype=torch.float32,
             device_map="auto"
         )
 
-    def add_to_stm(self, query: str, response: str):
-        """Add conversation turn to short-term memory"""
-        self.stm.append({
-            'query': query,
-            'response': response
-        })
+    def _clean_llm_response(self, response):
+        """Helper to safely clean response"""
+        text = response[0]['generated_text']
+        if "[/INST]" in text:
+            return text.split('[/INST]')[-1].strip()
+        return text.strip()
 
-        # Keep only recent turns
+    def add_to_stm(self, query: str, response: str):
+        self.stm.append({'query': query, 'response': response})
         if len(self.stm) > self.max_stm_turns:
             self.stm.pop(0)
 
     def generate_stm_summary_with_llm(self):
-        """LLM generates summary of conversation"""
         if not self.stm:
             return "No conversation history yet."
 
-        conversation = "\n".join([
-            f"User: {turn['query']}\nBot: {turn['response']}"
-            for turn in self.stm
-        ])
+        # Limit context to last 3 interactions to keep prompt small
+        recent_stm = self.stm[-3:]
+        conversation = " ".join([f"User: {t['query']} Bot: {t['response']}" for t in recent_stm])
 
-        prompt = f"""<s>[INST] Summarize this conversation in 2-3 sentences, focusing on key information and user intent:
+        # FIX: Few-Shot Summary
+        prompt = f"""Task: Summarize the travel conversation in 1 sentence.
 
-{conversation}
+Example 1:
+Context: User: Hi. Bot: Hello! User: Book a flight to Paris. Bot: Done.
+Summary: The user booked a flight to Paris.
 
-Summary: [/INST]"""
+Example 2:
+Context: User: I like sushi. Bot: Noted. User: Where is a good place? Bot: Tokyo.
+Summary: The user likes sushi and asked for restaurant recommendations in Tokyo.
 
-        result = self.llm(prompt, max_new_tokens=150, do_sample=True, temperature=0.7)[0]['generated_text']
-        summary = result.split('[/INST]')[-1].strip()
+Task:
+Context: {conversation}
+Summary:"""
 
-        return summary
+        result = self.llm(prompt, max_new_tokens=50, do_sample=True, temperature=0.7)
+        return self._clean_llm_response(result)
 
     def extract_user_preferences_with_llm(self, query: str, response: str):
-        """LLM extracts user preferences from conversation"""
-        prompt = f"""<s>[INST] Extract user preferences, dislikes, and personal facts from this conversation turn:
+        # FIX: Chain of Thought (CoT) + Parsing Strategy
+        # We need to distinguish between a *question* about a topic and a *preference* for it.
 
-User: {query}
-Bot: {response}
+        prompt = f"""Task: Extract permanent User Data (Preferences, Dislikes, Facts).
+Ignore temporary questions.
 
-Extract:
-1. Preferences (things user likes, wants, prefers)
-2. Dislikes (things user doesn't like, wants to avoid)
-3. Personal facts (user's location, travel dates, budget, etc.)
+Example 1:
+Input: "I love hiking but I hate rain."
+Thought: 'Love' implies positive preference. 'Hate' implies dislike.
+Output: Preference: hiking | Dislike: rain
 
-Respond in this format:
-Preferences: <comma-separated list or "none">
-Dislikes: <comma-separated list or "none">
-Facts: <comma-separated list or "none">
-[/INST]"""
+Example 2:
+Input: "Is it raining in London?"
+Thought: This is a question about weather, not a dislike of rain.
+Output: None
 
-        result = self.llm(prompt, max_new_tokens=200, do_sample=False)[0]['generated_text']
-        response_text = result.split('[/INST]')[-1].strip()
+Example 3:
+Input: "I am a vegan and I need a hotel in Berlin."
+Thought: 'Vegan' is a fact/dietary preference. 'Hotel in Berlin' is a current need (Fact).
+Output: Fact: Vegan | Fact: Location Berlin
 
-        # Parse response
+Task:
+Input: "{query}"
+Thought:"""
+
+        # Increased tokens for "Thought" generation
+        result = self.llm(prompt, max_new_tokens=60, do_sample=False)
+        response_text = self._clean_llm_response(result)
+
         extracted = {
             'preferences': [],
             'dislikes': [],
             'facts': []
         }
 
-        for line in response_text.split('\n'):
-            if 'Preferences:' in line:
-                prefs = line.split('Preferences:')[-1].strip()
-                if prefs.lower() != 'none':
-                    extracted['preferences'] = [p.strip() for p in prefs.split(',')]
-            elif 'Dislikes:' in line:
-                dislikes = line.split('Dislikes:')[-1].strip()
-                if dislikes.lower() != 'none':
-                    extracted['dislikes'] = [d.strip() for d in dislikes.split(',')]
-            elif 'Facts:' in line:
-                facts = line.split('Facts:')[-1].strip()
-                if facts.lower() != 'none':
-                    extracted['facts'] = [f.strip() for f in facts.split(',')]
+        # Robust Parsing: Look for delimiters (| or newline)
+        parts = response_text.replace('\n', '|').split('|')
+
+        for part in parts:
+            part = part.strip()
+            # We look for the keyword after the colon to avoid parsing the "Thought" section
+            if "Preference:" in part:
+                val = part.split("Preference:")[-1].strip()
+                if val and val.lower() != 'none': extracted['preferences'].append(val)
+            elif "Dislike:" in part:
+                val = part.split("Dislike:")[-1].strip()
+                if val and val.lower() != 'none': extracted['dislikes'].append(val)
+            elif "Fact:" in part:
+                val = part.split("Fact:")[-1].strip()
+                if val and val.lower() != 'none': extracted['facts'].append(val)
 
         return extracted
 
     def update_ltm(self, query: str, response: str):
-        """Update long-term memory with extracted information"""
         extracted = self.extract_user_preferences_with_llm(query, response)
 
-        # Update LTM
+        # Update Logic
         for pref in extracted['preferences']:
-            if pref:
-                self.ltm['preferences'][pref] = self.ltm['preferences'].get(pref, 0) + 1
+            self.ltm['preferences'][pref] = self.ltm['preferences'].get(pref, 0) + 1
+            print(f"Memory: Learned Preference -> {pref}")
 
         for dislike in extracted['dislikes']:
-            if dislike:
-                self.ltm['dislikes'][dislike] = self.ltm['dislikes'].get(dislike, 0) + 1
+            self.ltm['dislikes'][dislike] = self.ltm['dislikes'].get(dislike, 0) + 1
+            print(f"Memory: Learned Dislike -> {dislike}")
 
         for fact in extracted['facts']:
-            if fact:
-                key = fact.split(':')[0].strip() if ':' in fact else fact
-                value = fact.split(':')[-1].strip() if ':' in fact else fact
-                self.ltm['facts'][key] = value
+            clean_fact = fact.replace('Fact:', '').strip()
+            if clean_fact:
+                # Simple deduplication using the fact as the key
+                self.ltm['facts'][clean_fact] = "Active"
+                print(f"Memory: Learned Fact -> {clean_fact}")
 
     def get_memory_context(self):
-        """Get formatted memory context for main LLM"""
         stm_summary = self.generate_stm_summary_with_llm()
 
         ltm_summary = []
         if self.ltm['preferences']:
+            # Get top 3 most mentioned preferences
             top_prefs = sorted(self.ltm['preferences'].items(), key=lambda x: x[1], reverse=True)[:3]
-            ltm_summary.append(f"User prefers: {', '.join([p[0] for p in top_prefs])}")
+            ltm_summary.append(f"Likes: {', '.join([p[0] for p in top_prefs])}")
 
         if self.ltm['dislikes']:
             top_dislikes = sorted(self.ltm['dislikes'].items(), key=lambda x: x[1], reverse=True)[:3]
-            ltm_summary.append(f"User dislikes: {', '.join([d[0] for d in top_dislikes])}")
+            ltm_summary.append(f"Dislikes: {', '.join([d[0] for d in top_dislikes])}")
 
         if self.ltm['facts']:
-            ltm_summary.append(
-                f"Known facts: {', '.join([f'{k}: {v}' for k, v in list(self.ltm['facts'].items())[:5]])}")
+            # Just take the last 3 facts
+            facts_list = list(self.ltm['facts'].keys())[-3:]
+            ltm_summary.append(f"User Info: {', '.join(facts_list)}")
 
         return {
             'stm_summary': stm_summary,
-            'ltm_summary': ' | '.join(ltm_summary) if ltm_summary else 'No long-term preferences yet',
-            'recent_turns': self.stm[-3:] if len(self.stm) > 0 else []
+            'ltm_summary': ' | '.join(ltm_summary) if ltm_summary else 'No prior data',
+            'recent_turns': self.stm[-3:]
         }

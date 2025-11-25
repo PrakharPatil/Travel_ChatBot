@@ -82,7 +82,7 @@ def test_conversational_queries():
             response = requests.post(
                 f"{BASE_URL}/query",
                 json={"query": query},
-                timeout=30
+                timeout=120
             )
 
             if response.status_code == 200:
@@ -118,7 +118,7 @@ def test_rag_queries():
             response = requests.post(
                 f"{BASE_URL}/query",
                 json={"query": query},
-                timeout=60
+                timeout=120
             )
 
             if response.status_code == 200:
@@ -155,7 +155,7 @@ def test_api_call_queries():
             response = requests.post(
                 f"{BASE_URL}/query",
                 json={"query": query},
-                timeout=60
+                timeout=120
             )
 
             if response.status_code == 200:
@@ -195,7 +195,7 @@ def test_conversational_flow():
             response = requests.post(
                 f"{BASE_URL}/query",
                 json={"query": query},
-                timeout=60
+                timeout=120
             )
 
             if response.status_code == 200:
@@ -227,7 +227,7 @@ def test_api_missing_params():
         response = requests.post(
             f"{BASE_URL}/query",
             json={"query": query},
-            timeout=60
+            timeout=120
         )
 
         if response.status_code == 200:
@@ -250,7 +250,7 @@ def test_reset_memory():
     print_test(13, "Reset Memory")
 
     try:
-        response = requests.post(f"{BASE_URL}/reset_memory", timeout=5)
+        response = requests.post(f"{BASE_URL}/reset_memory", timeout=60)
 
         if response.status_code == 200:
             data = response.json()

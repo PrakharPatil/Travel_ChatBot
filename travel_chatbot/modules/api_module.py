@@ -1,4 +1,3 @@
-# modules/api_module.py
 import json
 import requests
 from transformers import pipeline
@@ -6,180 +5,243 @@ import torch
 
 
 class AskToActAPI:
-    def __init__(self, serpapi_key, llm_model='mistralai/Mistral-7B-Instruct-v0.2'):
+    def __init__(self, serpapi_key, llm_model='google/flan-t5-base'):
         self.serpapi_key = serpapi_key
+
+        # Dynamic task selection
+        task = "text2text-generation" if "t5" in llm_model.lower() else "text-generation"
+        print(f"API Module: Loading {llm_model} with task '{task}'")
+
         self.llm = pipeline(
-            "text-generation",
+            task,
             model=llm_model,
-            dtype=torch.float16,
+            dtype=torch.float32,
             device_map="auto"
         )
 
-        # API schemas
         self.api_schemas = {
             "flight_search": {
                 "required": ["departure_id", "arrival_id", "outbound_date"],
-                "optional": ["return_date", "adults", "currency"]
+                "optional": ["return_date"]
             },
             "weather": {
                 "required": ["location"],
-                "optional": ["date", "units"]
+                "optional": []
             },
             "hotel_search": {
-                "required": ["location", "check_in_date", "check_out_date"],
-                "optional": ["adults", "currency", "rating"]
+                "required": ["location", "check_in_date"],
+                "optional": ["currency"]
             }
         }
 
+    def _clean_llm_response(self, response):
+        """Helper to clean response"""
+        text = response[0]['generated_text']
+        if "[/INST]" in text:
+            return text.split('[/INST]')[-1].strip()
+        return text.strip()
+
     def detect_api_type_with_llm(self, query: str):
-        """LLM determines which API to call"""
-        prompt = f"""<s>[INST] Determine which API should be called for this travel query:
+        # STRATEGY: Chain of Thought (CoT)
+        # We ask the model to "think" about the intent before assigning a label.
 
+        prompt = f"""Task: Identify the API Intent (flight_search, weather, hotel_search).
+
+Example 1:
+Query: "Is it raining in Tokyo today?"
+Thought: The user is asking about rain and conditions. This is a weather request.
+Intent: weather
+
+Example 2:
+Query: "I need to fly from NY to London next week."
+Thought: The user wants to travel by air between cities. This is a flight request.
+Intent: flight_search
+
+Example 3:
+Query: "Find a cheap room in Paris for 2 nights."
+Thought: 'Room' implies accommodation/hotel.
+Intent: hotel_search
+
+Task:
 Query: "{query}"
+Thought:"""
 
-Available APIs:
-- flight_search: For flight information, prices, availability
-- weather: For weather information
-- hotel_search: For hotel information, prices, availability
+        # Increased max tokens to allow for the "Thought" generation
+        result = self.llm(prompt, max_new_tokens=40, do_sample=False)
+        response_text = self._clean_llm_response(result).lower()
 
-Respond with ONLY the API name. [/INST]"""
+        # Robust Parsing: Look for the intent keyword
+        if "weather" in response_text: return "weather"
+        if "hotel" in response_text: return "hotel_search"
+        if "flight" in response_text: return "flight_search"
+        if "fly" in response_text: return "flight_search"
 
-        result = self.llm(prompt, max_new_tokens=20, do_sample=False)[0]['generated_text']
-        api_type = result.split('[/INST]')[-1].strip().lower()
-
-        for api in self.api_schemas.keys():
-            if api in api_type:
-                return api
-
-        return "flight_search"  # Default
+        return "flight_search"  # Default fallback
 
     def extract_parameters_with_llm(self, query: str, api_type: str, conversation_history: list = None):
-        """LLM extracts API parameters from query"""
-        schema = self.api_schemas[api_type]
+        # STRATEGY: Text-to-Key-Value (No JSON)
+        # T5 is bad at JSON brackets. We ask for "Key: Value | Key: Value" format instead.
 
-        history_context = ""
+        context_str = ""
         if conversation_history:
-            history_context = "\n\nPrevious conversation:\n" + "\n".join([
-                f"User: {turn['query']}\nBot: {turn['response']}"
-                for turn in conversation_history[-3:]
-            ])
+            # We include history so it can resolve "there" or "tomorrow" based on context
+            context_str = " ".join([t['query'] for t in conversation_history[-2:]])
 
-        prompt = f"""<s>[INST] Extract API parameters from the user query. Consider the conversation history for context.
+        full_input = f"{context_str} {query}".strip()
 
-API: {api_type}
-Required parameters: {schema['required']}
-Optional parameters: {schema['optional']}
+        prompt = ""
+        if api_type == "weather":
+            prompt = f"""Task: Extract Location for weather.
+Example 1:
+Query: "Weather in Tokyo"
+Thought: The location is Tokyo.
+Output: Location: Tokyo
 
-Query: "{query}"{history_context}
+Example 2:
+Query: "How is it in New York?"
+Thought: The location is New York.
+Output: Location: New York
 
-Extract the parameters and respond in JSON format. For missing required parameters, set value to null.
+Task:
+Query: "{full_input}"
+Thought:"""
 
-Example format:
-{{
-  "departure_id": "JFK",
-  "arrival_id": "LAX",
-  "outbound_date": "2025-12-01",
-  "adults": 1
-}}
+        elif api_type == "flight_search":
+            prompt = f"""Task: Extract Departure, Arrival, and Date.
+Example 1:
+Query: "Fly from NY to London on 2025-05-01"
+Thought: From NY (Departure) to London (Arrival) on 2025-05-01 (Date).
+Output: Departure: NY | Arrival: London | Date: 2025-05-01
 
-Respond with ONLY valid JSON. [/INST]"""
+Example 2:
+Query: "Book a flight to Paris from Berlin tomorrow"
+Thought: From Berlin (Departure) to Paris (Arrival) date is tomorrow.
+Output: Departure: Berlin | Arrival: Paris | Date: tomorrow
 
-        result = self.llm(prompt, max_new_tokens=200, do_sample=False)[0]['generated_text']
-        json_str = result.split('[/INST]')[-1].strip()
+Task:
+Query: "{full_input}"
+Thought:"""
 
-        # Extract JSON from response
-        try:
-            # Find JSON object in response
-            start = json_str.find('{')
-            end = json_str.rfind('}') + 1
-            if start != -1 and end != 0:
-                json_str = json_str[start:end]
+        elif api_type == "hotel_search":
+            prompt = f"""Task: Extract Location and Check-in Date.
+Example 1:
+Query: "Hotel in Dubai for tomorrow"
+Thought: City is Dubai, time is tomorrow.
+Output: Location: Dubai | Date: tomorrow
 
-            parameters = json.loads(json_str)
-        except Exception as e:
-            print(f"JSON parsing error: {e}")
-            parameters = {}
+Task:
+Query: "{full_input}"
+Thought:"""
+
+        result = self.llm(prompt, max_new_tokens=80, do_sample=False)
+        text = self._clean_llm_response(result)
+
+        # --- Python Parsing Logic (Replaces fragile JSON parsing) ---
+        parameters = {}
+
+        # We split by '|' or newlines, then look for "Key:"
+        parts = text.replace('|', '\n').split('\n')
+
+        for part in parts:
+            part = part.strip()
+            if "Location:" in part:
+                parameters['location'] = part.split("Location:")[-1].strip()
+            elif "Departure:" in part:
+                parameters['departure_id'] = part.split("Departure:")[-1].strip()
+            elif "Arrival:" in part:
+                parameters['arrival_id'] = part.split("Arrival:")[-1].strip()
+            elif "Date:" in part:
+                # Map 'Date' to the specific field needed based on API type
+                val = part.split("Date:")[-1].strip()
+                if api_type == "flight_search":
+                    parameters['outbound_date'] = val
+                else:
+                    parameters['check_in_date'] = val
 
         return parameters
 
     def identify_missing_parameters(self, parameters: dict, api_type: str):
-        """Check for missing required parameters"""
         schema = self.api_schemas[api_type]
         missing = []
-
         for param in schema['required']:
-            if param not in parameters or parameters[param] is None or parameters[param] == "":
+            # Check if key exists and is not empty
+            if param not in parameters or not parameters[param] or parameters[param].lower() == "none":
                 missing.append(param)
-
         return missing
 
     def generate_clarification_with_llm(self, missing_params: list, api_type: str):
-        """LLM generates natural clarification question"""
-        prompt = f"""<s>[INST] Generate a natural, friendly question to ask the user for missing information.
+        # STRATEGY: Conversational Refinement
+        prompt = f"""Task: Politely ask the user for missing travel information.
 
-API Type: {api_type}
-Missing Parameters: {missing_params}
+Example 1:
+Missing: location
+Output: "Where would you like to check the weather for?"
 
-Generate ONE concise question that asks for all missing information naturally.
+Example 2:
+Missing: departure_id, outbound_date
+Output: "Where are you flying from, and when do you want to leave?"
 
-Examples:
-- "Where are you flying from and to? Also, what date?"
-- "Which city would you like to check the weather for?"
-- "When do you want to check in and check out?"
+Example 3:
+Missing: arrival_id
+Output: "What is your destination city?"
 
-Generate ONLY the question. [/INST]"""
+Task:
+Missing: {', '.join(missing_params)}
+Output:"""
 
-        result = self.llm(prompt, max_new_tokens=100, do_sample=True, temperature=0.7)[0]['generated_text']
-        question = result.split('[/INST]')[-1].strip()
-
-        return question
+        result = self.llm(prompt, max_new_tokens=50, do_sample=True, temperature=0.7)
+        return self._clean_llm_response(result)
 
     def call_flight_api(self, params: dict):
-        """Call Google Flights via SerpAPI"""
-        url = "https://serpapi.com/search.json"
+        # [Image of REST API architecture]
+        if not self.serpapi_key:
+            return {"flights": [{"airline": "Mock Airline", "price": "$500", "duration": "10h"}]}
 
+        url = "https://serpapi.com/search.json"
         api_params = {
             "engine": "google_flights",
             "departure_id": params.get('departure_id'),
             "arrival_id": params.get('arrival_id'),
             "outbound_date": params.get('outbound_date'),
-            "api_key": self.serpapi_key
+            "api_key": self.serpapi_key,
+            "currency": "USD"
         }
 
-        if params.get('return_date'):
-            api_params['return_date'] = params['return_date']
-
         try:
-            response = requests.get(url, params=api_params)
-            return response.json()
+            print(f"Calling Flight API with: {api_params}")
+            response = requests.get(url, params=api_params, timeout=10)
+            data = response.json()
+
+            if 'best_flights' in data:
+                return data['best_flights'][:2]
+            return {"status": "No flights found", "raw": str(data)[:100]}
+
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": f"Flight API Error: {str(e)}"}
 
     def call_weather_api(self, params: dict):
-        """Call weather API"""
-        # Using wttr.in as free alternative
-        location = params.get('location', '').replace(' ', '+')
-        url = f"https://wttr.in/{location}?format=j1"
+        location = params.get('location', 'London').replace(' ', '+')
+        url = f"https://wttr.in/{location}?format=3"
 
         try:
-            response = requests.get(url)
-            return response.json()
+            response = requests.get(url, timeout=5)
+            return {"weather_report": response.text.strip()}
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": f"Weather API Error: {str(e)}"}
 
     def process(self, query: str, conversation_history: list = None):
-        """Main AskToAct pipeline"""
-        # Step 1: Detect API type
+        # 1. Detect
         api_type = self.detect_api_type_with_llm(query)
+        print(f"API Detected: {api_type}")
 
-        # Step 2: Extract parameters
+        # 2. Extract
         parameters = self.extract_parameters_with_llm(query, api_type, conversation_history)
+        print(f"Extracted Params: {parameters}")
 
-        # Step 3: Check for missing parameters
+        # 3. Check Missing
         missing = self.identify_missing_parameters(parameters, api_type)
 
         if missing:
-            # Generate clarification question
             clarification = self.generate_clarification_with_llm(missing, api_type)
             return {
                 'status': 'missing_params',
@@ -188,7 +250,7 @@ Generate ONLY the question. [/INST]"""
                 'partial_params': parameters
             }
 
-        # Step 4: Call API
+        # 4. Execute
         if api_type == "flight_search":
             api_result = self.call_flight_api(parameters)
         elif api_type == "weather":
