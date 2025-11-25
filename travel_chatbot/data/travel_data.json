@@ -1,0 +1,28 @@
+{
+  "cities": [
+    {
+      "name": "Paris",
+      "country": "France",
+      "attractions": ["Eiffel Tower", "Louvre Museum", "Notre-Dame Cathedral"],
+      "best_time": "April-June",
+      "budget": "medium-high",
+      "cuisine": ["French pastries", "Croissants", "Wine"]
+    },
+    {
+      "name": "Tokyo",
+      "country": "Japan",
+      "attractions": ["Senso-ji Temple", "Tokyo Tower", "Shibuya Crossing"],
+      "best_time": "March-May",
+      "budget": "high",
+      "cuisine": ["Sushi", "Ramen", "Tempura"]
+    },
+    {
+      "name": "London",
+      "country": "UK",
+      "attractions": ["Big Ben", "British Museum", "Tower Bridge"],
+      "best_time": "May-September",
+      "budget": "high",
+      "cuisine": ["Fish and Chips", "Afternoon Tea", "Curry"]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+flask
+transformers>=4.35.0
+torch>=2.0.0
+neo4j
+sentence-transformers
+accelerate
+datasets
+peft
+bitsandbytes
+requests
+beautifulsoup4
+pyyaml
+numpy
+scikit-learn

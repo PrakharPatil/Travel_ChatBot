@@ -1,0 +1,2 @@
+chmod +x test_backend.sh
+./test_backend.sh
