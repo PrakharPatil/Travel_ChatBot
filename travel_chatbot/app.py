@@ -102,10 +102,13 @@ def handle_query():
             # Graph RAG pipeline
             rag_context = graph_rag.retrieve_context(user_query)
 
-            # Corrective RAG
+            # Corrective RAG (now returns dict with 'context' key)
             crag_result = crag.process(user_query, rag_context)
 
-            context['rag_context'] = crag_result['context']
+            # Use the 'context' key from CRAG result
+            # The fixed CRAG module always returns {'context': ...}
+            context['rag_context'] = crag_result.get('context', rag_context)
+
             response = main_llm.generate_response(user_query, context)
 
         elif query_type == "API_Call":
@@ -124,7 +127,6 @@ def handle_query():
             response = "I'm not sure how to help with that. Can you rephrase?"
 
         # Step 4: Update memory
-        # This calls the fixed MemoryManager which now handles T5 safely
         memory.add_to_stm(user_query, response)
         memory.update_ltm(user_query, response)
 

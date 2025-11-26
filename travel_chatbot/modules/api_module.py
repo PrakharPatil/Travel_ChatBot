@@ -1,5 +1,6 @@
 import json
 import requests
+import yaml
 from transformers import pipeline
 import torch
 
@@ -193,7 +194,7 @@ Output:"""
         return self._clean_llm_response(result)
 
     def call_flight_api(self, params: dict):
-        # [Image of REST API architecture]
+        #
         if not self.serpapi_key:
             return {"flights": [{"airline": "Mock Airline", "price": "$500", "duration": "10h"}]}
 
@@ -264,3 +265,33 @@ Output:"""
             'parameters': parameters,
             'result': api_result
         }
+
+# --- TESTING FUNCTIONALITIES ---
+if __name__ == "__main__":
+    import os
+
+    # 1. SETUP: Load Config
+    SERPAPI_KEY = None
+    try:
+        with open('../configs/config.yaml', 'r') as f:
+            config = yaml.safe_load(f)
+            if 'apis' in config and 'serpapi_key' in config['apis']:
+                SERPAPI_KEY = config['apis']['serpapi_key']
+    except Exception as e:
+        print(f"Config Warning: {e}. Using mock data for flights.")
+
+    # 2. INITIALIZE
+    print("\n--- Initializing API Module ---")
+    agent = AskToActAPI(serpapi_key=SERPAPI_KEY, llm_model='google/flan-t5-base')
+
+    # 3. TEST CASES
+    test_queries = [
+        "What is the weather in Tokyo?",
+        "I want to book a flight to Paris.",  # Should trigger missing params
+        "Fly from New York to London on 2025-05-01" # Should trigger success (or mock)
+    ]
+
+    for q in test_queries:
+        print(f"\n--- Testing Query: '{q}' ---")
+        result = agent.process(q)
+        print(f"Result:\n{json.dumps(result, indent=2)}")
